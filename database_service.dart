@@ -66,4 +66,28 @@ class DatabaseService {
     final result = await db.query(
       SensorReadingFields.tableName,
       where: '${SensorReadingFields.isHighReading} = ?',
-      whereArgs
+      whereArgs: [1],
+      orderBy: orderBy,
+    );
+
+    return result.map((json) => SensorReading.fromJson(json)).toList();
+  }
+
+  Future<int> deleteReading(int id) async {
+    final db = await instance.database;
+    return await db.delete(
+      SensorReadingFields.tableName,
+      where: '${SensorReadingFields.id} = ?',
+      whereArgs: [id],
+    );
+  }
+
+  Future<void> deleteAllReadings() async {
+    final db = await instance.database;
+    await db.delete(SensorReadingFields.tableName);
+  }
+
+  Future<void> close() async {
+    final db = await instance.database;
+    db.close();
+  }
