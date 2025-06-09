@@ -1,8 +1,6 @@
 import 'package:flutter/material.dart';
-import 'package:connectivity_plus/connectivity_plus.dart';
-import 'package:wifi_scan/wifi_scan.dart';
-import 'package:permission_handler/permission_handler.dart';
-import '../services/esp32_service.dart';
+import 'package:webview_flutter/webview_flutter.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 
 class NetworkSettingsScreen extends StatefulWidget {
   const NetworkSettingsScreen({super.key});
@@ -12,417 +10,153 @@ class NetworkSettingsScreen extends StatefulWidget {
 }
 
 class _NetworkSettingsScreenState extends State<NetworkSettingsScreen> {
-  final ESP32Service _esp32Service = ESP32Service();
-  List<WiFiAccessPoint> _wifiNetworks = [];
-  bool _isScanning = false;
-  bool _isConnectedToGASOX = false;
-  String? _selectedNetwork;
-  final TextEditingController _passwordController = TextEditingController();
+  bool _showPortal = false;
   final TextEditingController _ipController = TextEditingController();
+  late final WebViewController controller;
 
   @override
   void initState() {
     super.initState();
-    _checkGASOXConnection();
-    _requestPermissions();
+    controller = WebViewController()
+      ..setJavaScriptMode(JavaScriptMode.unrestricted)
+      ..setNavigationDelegate(
+        NavigationDelegate(
+          onWebResourceError: (error) {
+            ScaffoldMessenger.of(context).showSnackBar(
+              SnackBar(
+                content: Text(
+                  'No se pudo cargar el portal. ¿Estás conectado a la red GASOX?',
+                ),
+              ),
+            );
+          },
+        ),
+      )
+      ..loadRequest(Uri.parse('http://192.168.4.1'));
+    _loadSavedIp();
   }
 
-  Future<void> _requestPermissions() async {
-    await [
-      Permission.location,
-      Permission.accessWifiState,
-      Permission.changeWifiState,
-      Permission.nearbyWifiDevices,
-    ].request();
+  Future<void> _loadSavedIp() async {
+    final prefs = await SharedPreferences.getInstance();
+    _ipController.text = prefs.getString('esp32_ip') ?? '';
   }
 
-  Future<void> _checkGASOXConnection() async {
-    final connectivityResult = await Connectivity().checkConnectivity();
-    if (connectivityResult == ConnectivityResult.wifi) {
-      // Aquí puedes verificar si estás conectado a GASOX
-      // Por simplicidad, asumimos que si el ESP32 responde, estamos conectados
-      try {
-        await _esp32Service.getSensorValues();
-        setState(() {
-          _isConnectedToGASOX = true;
-        });
-        _scanWiFiNetworks();
-      } catch (e) {
-        setState(() {
-          _isConnectedToGASOX = false;
-        });
-      }
-    }
-  }
-
-  Future<void> _scanWiFiNetworks() async {
-    if (!_isConnectedToGASOX) return;
-    
-    setState(() {
-      _isScanning = true;
-    });
-
-    try {
-      final canScan = await WiFiScan.instance.canStartScan();
-      if (canScan == CanStartScan.yes) {
-        await WiFiScan.instance.startScan();
-        
-        // Esperar un momento para que complete el escaneo
-        await Future.delayed(const Duration(seconds: 3));
-        
-        final networks = await WiFiScan.instance.getScannedResults();
-        setState(() {
-          _wifiNetworks = networks
-              .where((network) => network.ssid.isNotEmpty)
-              .toList();
-        });
-      }
-    } catch (e) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-          content: Text('Error al escanear redes WiFi: $e'),
-          backgroundColor: Colors.red,
-        ),
-      );
-    } finally {
-      setState(() {
-        _isScanning = false;
-      });
-    }
-  }
-
-  Future<void> _connectToWiFi() async {
-    if (_selectedNetwork == null) return;
-
-    try {
-      // Aquí implementarías la lógica para conectar el ESP32 a la red WiFi
-      // Por ahora, solo mostramos un mensaje de éxito
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-          content: Text('Conectando ESP32 a $_selectedNetwork...'),
-          backgroundColor: Colors.blue,
-        ),
-      );
-
-      // Simular conexión
-      await Future.delayed(const Duration(seconds: 2));
-      
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(
-          content: Text('ESP32 conectado exitosamente'),
-          backgroundColor: Colors.green,
-        ),
-      );
-    } catch (e) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-          content: Text('Error al conectar: $e'),
-          backgroundColor: Colors.red,
-        ),
-      );
-    }
-  }
-
-  Future<void> _forgetWiFi() async {
-    try {
-      await _esp32Service.forgetWiFi();
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(
-          content: Text('WiFi olvidada. ESP32 reiniciado.'),
-          backgroundColor: Colors.green,
-        ),
-      );
-    } catch (e) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-          content: Text('Error al olvidar WiFi: $e'),
-          backgroundColor: Colors.red,
-        ),
-      );
-    }
+  Future<void> _saveIp(String ip) async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setString('esp32_ip', ip);
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(content: Text('IP guardada: $ip')),
+    );
   }
 
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      appBar: AppBar(
-        title: const Text('Configuración WiFi'),
-      ),
-      body: SingleChildScrollView(
-        padding: const EdgeInsets.all(16.0),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            // Instrucciones
-            Card(
-              color: Colors.blue.shade50,
-              child: const Padding(
-                padding: EdgeInsets.all(16.0),
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Text(
-                      'Instrucciones de Conexión',
-                      style: TextStyle(
-                        fontSize: 18,
-                        fontWeight: FontWeight.bold,
-                        color: Colors.blue,
-                      ),
-                    ),
-                    SizedBox(height: 8),
-                    Text(
-                      '1. Asegúrate de que el ESP32 esté encendido\n'
-                      '2. Conecta tu dispositivo a la red "GASOX"\n'
-                      '3. Una vez conectado, escanea las redes disponibles\n'
-                      '4. Selecciona la red WiFi deseada e ingresa la contraseña\n'
-                      '5. El ESP32 se conectará a tu red WiFi',
-                      style: TextStyle(fontSize: 14),
-                    ),
-                  ],
-                ),
-              ),
-            ),
-            
-            const SizedBox(height: 20),
-            
-            // Estado de conexión
-            Card(
-              child: Padding(
-                padding: const EdgeInsets.all(16.0),
-                child: Row(
-                  children: [
-                    Icon(
-                      _isConnectedToGASOX ? Icons.wifi : Icons.wifi_off,
-                      color: _isConnectedToGASOX ? Colors.green : Colors.red,
-                      size: 32,
-                    ),
-                    const SizedBox(width: 16),
-                    Expanded(
-                      child: Column(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        children: [
-                          Text(
-                            _isConnectedToGASOX 
-                                ? 'Conectado a GASOX' 
-                                : 'No conectado a GASOX',
-                            style: const TextStyle(
-                              fontSize: 16,
-                              fontWeight: FontWeight.bold,
-                            ),
-                          ),
-                          Text(
-                            _isConnectedToGASOX 
-                                ? 'Listo para configurar WiFi' 
-                                : 'Conéctate a la red GASOX primero',
-                            style: const TextStyle(fontSize: 14),
-                          ),
-                        ],
-                      ),
-                    ),
-                    if (!_isConnectedToGASOX)
-                      ElevatedButton(
-                        onPressed: _checkGASOXConnection,
-                        child: const Text('Verificar'),
-                      ),
-                  ],
-                ),
-              ),
-            ),
-            
-            const SizedBox(height: 20),
-            
-            // Configuración IP personalizada
-            Card(
-              child: Padding(
-                padding: const EdgeInsets.all(16.0),
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    const Text(
-                      'IP del ESP32 (opcional)',
-                      style: TextStyle(
-                        fontSize: 16,
-                        fontWeight: FontWeight.bold,
-                      ),
-                    ),
-                    const SizedBox(height: 8),
-                    TextField(
-                      controller: _ipController,
-                      decoration: const InputDecoration(
-                        hintText: '192.168.1.100',
-                        labelText: 'Dirección IP',
-                        border: OutlineInputBorder(),
-                      ),
-                      keyboardType: TextInputType.number,
-                    ),
-                    const SizedBox(height: 8),
-                    SizedBox(
-                      width: double.infinity,
-                      child: ElevatedButton(
-                        onPressed: () async {
-                          if (_ipController.text.isNotEmpty) {
-                            await _esp32Service.setESP32IP(_ipController.text);
-                            ScaffoldMessenger.of(context).showSnackBar(
-                              const SnackBar(
-                                content: Text('IP configurada correctamente'),
-                                backgroundColor: Colors.green,
-                              ),
-                            );
-                          }
-                        },
-                        child: const Text('Configurar IP'),
-                      ),
-                    ),
-                  ],
-                ),
-              ),
-            ),
-            
-            const SizedBox(height: 20),
-            
-            // Lista de redes WiFi
-            if (_isConnectedToGASOX) ...[
-              Card(
-                child: Padding(
-                  padding: const EdgeInsets.all(16.0),
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      Row(
-                        mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                        children: [
-                          const Text(
-                            'Redes WiFi Disponibles',
-                            style: TextStyle(
-                              fontSize: 16,
-                              fontWeight: FontWeight.bold,
-                            ),
-                          ),
-                          IconButton(
-                            onPressed: _isScanning ? null : _scanWiFiNetworks,
-                            icon: _isScanning 
-                                ? const SizedBox(
-                                    width: 20,
-                                    height: 20,
-                                    child: CircularProgressIndicator(strokeWidth: 2),
-                                  )
-                                : const Icon(Icons.refresh),
-                          ),
-                        ],
-                      ),
-                      const SizedBox(height: 16),
-                      
-                      if (_wifiNetworks.isEmpty && !_isScanning) ...[
-                        const Text('No se encontraron redes. Presiona actualizar.'),
-                      ] else ...[
-                        SizedBox(
-                          height: 200,
-                          child: ListView.builder(
-                            itemCount: _wifiNetworks.length,
-                            itemBuilder: (context, index) {
-                              final network = _wifiNetworks[index];
-                              return ListTile(
-                                leading: Icon(
-                                  Icons.wifi,
-                                  color: _getSignalColor(network.level),
-                                ),
-                                title: Text(network.ssid),
-                                subtitle: Text('${network.level} dBm'),
-                                trailing: Radio<String>(
-                                  value: network.ssid,
-                                  groupValue: _selectedNetwork,
-                                  onChanged: (value) {
-                                    setState(() {
-                                      _selectedNetwork = value;
-                                    });
-                                  },
-                                ),
-                                onTap: () {
-                                  setState(() {
-                                    _selectedNetwork = network.ssid;
-                                  });
-                                },
-                              );
-                            },
-                          ),
-                        ),
-                      ],
-                    ],
+      appBar: AppBar(title: const Text('Configuración de Red')),
+      body: _showPortal
+          ? Column(
+              children: [
+                Container(
+                  color: Colors.orange,
+                  width: double.infinity,
+                  padding: const EdgeInsets.all(8),
+                  child: const Text(
+                    'Portal de configuración del ESP32',
+                    style: TextStyle(
+                        color: Colors.black, fontWeight: FontWeight.bold),
                   ),
                 ),
-              ),
-              
-              const SizedBox(height: 20),
-              
-              // Configuración de contraseña
-              if (_selectedNetwork != null) ...[
-                Card(
-                  child: Padding(
-                    padding: const EdgeInsets.all(16.0),
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        Text(
-                          'Conectar a: $_selectedNetwork',
-                          style: const TextStyle(
-                            fontSize: 16,
-                            fontWeight: FontWeight.bold,
-                          ),
-                        ),
-                        const SizedBox(height: 16),
-                        TextField(
-                          controller: _passwordController,
-                          decoration: const InputDecoration(
-                            labelText: 'Contraseña WiFi',
-                            border: OutlineInputBorder(),
-                          ),
-                          obscureText: true,
-                        ),
-                        const SizedBox(height: 16),
-                        SizedBox(
-                          width: double.infinity,
-                          child: ElevatedButton(
-                            onPressed: _connectToWiFi,
-                            child: const Text('Conectar ESP32'),
-                          ),
-                        ),
-                      ],
+                Expanded(
+                  child: WebViewWidget(
+                    controller: controller,
+                  ),
+                ),
+                Padding(
+                  padding: const EdgeInsets.all(8.0),
+                  child: ElevatedButton.icon(
+                    icon: const Icon(Icons.arrow_back),
+                    label: const Text('Volver a instrucciones'),
+                    onPressed: () => setState(() => _showPortal = false),
+                  ),
+                ),
+                ElevatedButton.icon(
+                  icon: const Icon(Icons.refresh),
+                  label: const Text('Recargar portal'),
+                  onPressed: () => controller.reload(),
+                )
+              ],
+            )
+          : ListView(
+              padding: const EdgeInsets.all(16),
+              children: [
+                Text(
+                  '¿Cómo conectar tu ESP32 a tu red WiFi?',
+                  style: TextStyle(
+                    color: Colors.orange,
+                    fontWeight: FontWeight.bold,
+                    fontSize: 20,
+                  ),
+                ),
+                const SizedBox(height: 16),
+                const Text(
+                  '1. Enciende tu ESP32. Debería aparecer una red WiFi llamada "GASOX".\n'
+                  '2. Conéctate a esa red desde tu teléfono.\n'
+                  '3. Presiona el botón de abajo para abrir el portal de configuración.\n'
+                  '4. Desde el portal, selecciona tu red WiFi y escribe la contraseña.\n'
+                  '5. El ESP32 se conectará a tu red y la red "GASOX" desaparecerá.',
+                  style: TextStyle(color: Colors.white70, fontSize: 16),
+                ),
+                const SizedBox(height: 32),
+                Center(
+                  child: ElevatedButton.icon(
+                    icon: const Icon(Icons.open_in_browser),
+                    label: const Text('Abrir portal de configuración'),
+                    style: ElevatedButton.styleFrom(
+                      backgroundColor: Colors.orange,
+                      foregroundColor: Colors.black,
+                    ),
+                    onPressed: () => setState(() => _showPortal = true),
+                  ),
+                ),
+                const SizedBox(height: 32),
+                Text(
+                  '¿Ya conectaste el ESP32 a tu red WiFi?',
+                  style: TextStyle(
+                      color: Colors.orange,
+                      fontWeight: FontWeight.bold,
+                      fontSize: 18),
+                ),
+                const SizedBox(height: 8),
+                const Text(
+                  'La app intentará conectar automáticamente a gasox.local.\n'
+                  'Si no funciona, pega aquí la IP que te mostró el portal:',
+                  style: TextStyle(color: Colors.white70),
+                ),
+                const SizedBox(height: 8),
+                TextField(
+                  controller: _ipController,
+                  decoration: InputDecoration(
+                    labelText: 'IP del ESP32 (opcional)',
+                    hintText: 'Ejemplo: 192.168.1.123',
+                    filled: true,
+                    fillColor: Colors.white10,
+                    border: const OutlineInputBorder(),
+                    suffixIcon: IconButton(
+                      icon: const Icon(Icons.save, color: Colors.orange),
+                      onPressed: () => _saveIp(_ipController.text),
                     ),
                   ),
+                  style: const TextStyle(color: Colors.orange),
+                  keyboardType: TextInputType.url,
+                  onSubmitted: (value) => _saveIp(value),
+                ),
+                const SizedBox(height: 8),
+                const Text(
+                  'Luego, la app usará gasox.local o la IP que pegaste para comunicarse con el ESP32.',
+                  style: TextStyle(color: Colors.white70),
                 ),
               ],
-              
-              const SizedBox(height: 20),
-              
-              // Botón para olvidar WiFi
-              SizedBox(
-                width: double.infinity,
-                child: ElevatedButton(
-                  onPressed: _forgetWiFi,
-                  style: ElevatedButton.styleFrom(
-                    backgroundColor: Colors.red,
-                    foregroundColor: Colors.white,
-                  ),
-                  child: const Text('Olvidar WiFi y Reiniciar ESP32'),
-                ),
-              ),
-            ],
-          ],
-        ),
-      ),
+            ),
     );
-  }
-
-  Color _getSignalColor(int level) {
-    if (level > -50) return Colors.green;
-    if (level > -70) return Colors.orange;
-    return Colors.red;
-  }
-
-  @override
-  void dispose() {
-    _passwordController.dispose();
-    _ipController.dispose();
-    super.dispose();
   }
 }
