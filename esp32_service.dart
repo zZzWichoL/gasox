@@ -10,13 +10,25 @@ class ESP32Service {
   static const String defaultIP = '192.168.4.1';
   static const int port = 8080;
   static const Duration timeout = Duration(seconds: 5);
-  
+
   DateTime? _lastAlarmSave;
   static const Duration minSaveInterval = Duration(minutes: 5);
 
-  Future<String> _getESP32IP() async {
+  Future<String?> _getManualIP() async {
     final prefs = await SharedPreferences.getInstance();
-    return prefs.getString('esp32_ip') ?? defaultIP;
+    return prefs.getString('esp32_ip');
+  }
+
+  Future<Socket> _connectToESP32() async {
+    // Intenta primero con gasox.local (mDNS)
+    try {
+      return await Socket.connect('gasox.local', port).timeout(timeout);
+    } catch (_) {
+      // Si falla, usa la IP guardada o la default
+      final manualIp = await _getManualIP();
+      final ip = manualIp != null && manualIp.isNotEmpty ? manualIp : defaultIP;
+      return await Socket.connect(ip, port).timeout(timeout);
+    }
   }
 
   Future<void> setESP32IP(String ip) async {
@@ -24,17 +36,11 @@ class ESP32Service {
     await prefs.setString('esp32_ip', ip);
   }
 
-  Future<Socket> _connectToESP32() async {
-    final ip = await _getESP32IP();
-    return await Socket.connect(ip, port).timeout(timeout);
-  }
-
   Future<String> _sendCommand(String command) async {
     Socket? socket;
     try {
       socket = await _connectToESP32();
       socket.write('$command\n');
-      
       final response = await socket.first.timeout(timeout);
       return String.fromCharCodes(response).trim();
     } finally {
@@ -46,7 +52,6 @@ class ESP32Service {
     try {
       final response = await _sendCommand('GET_VALUES');
       final values = {'mq4': 0, 'mq7': 0};
-      
       for (final line in response.split('\n')) {
         if (line.startsWith('MQ4:')) {
           values['mq4'] = int.tryParse(line.substring(4)) ?? 0;
@@ -54,7 +59,6 @@ class ESP32Service {
           values['mq7'] = int.tryParse(line.substring(4)) ?? 0;
         }
       }
-      
       return values;
     } catch (e) {
       throw Exception('Error al obtener valores de sensores: $e');
@@ -98,25 +102,19 @@ class ESP32Service {
     try {
       final values = await getSensorValues();
       final isAlarm = await getAlarmState();
-      
+
       if (isAlarm) {
-        // Verificar si han pasado 5 minutos desde la última alarma guardada
         final now = DateTime.now();
-        if (_lastAlarmSave == null || 
+        if (_lastAlarmSave == null ||
             now.difference(_lastAlarmSave!) >= minSaveInterval) {
-          
-          // Guardar la lectura de alarma
           final reading = SensorReading(
             timestamp: now,
             mq4Value: values['mq4'] ?? 0,
             mq7Value: values['mq7'] ?? 0,
             isHighReading: true,
           );
-          
           await DatabaseService.instance.insertReading(reading);
           _lastAlarmSave = now;
-          
-          // Mostrar notificación
           await _showAlarmNotification(values['mq4'] ?? 0, values['mq7'] ?? 0);
         }
       }
