@@ -89,6 +89,8 @@ class _NotificationsScreenState extends State<NotificationsScreen> {
     return Scaffold(
       appBar: AppBar(
         title: const Text('Notificaciones de Alarma'),
+        backgroundColor: Colors.red.shade700,
+        foregroundColor: Colors.white,
         actions: [
           IconButton(
             icon: const Icon(Icons.refresh),
@@ -353,3 +355,43 @@ class _NotificationsScreenState extends State<NotificationsScreen> {
                                     ),
                                     
                                     const SizedBox(height: 12),
+                                    
+                                    // Fecha y hora exacta
+                                    Container(
+                                      width: double.infinity,
+                                      padding: const EdgeInsets.all(8),
+                                      decoration: BoxDecoration(
+                                        color: Colors.grey.shade100,
+                                        borderRadius: BorderRadius.circular(8),
+                                      ),
+                                      child: Row(
+                                        children: [
+                                          const Icon(
+                                            Icons.access_time,
+                                            size: 16,
+                                            color: Colors.grey,
+                                          ),
+                                          const SizedBox(width: 8),
+                                          Text(
+                                            DateFormat('dd/MM/yyyy - HH:mm:ss').format(reading.timestamp),
+                                            style: const TextStyle(
+                                              fontSize: 14,
+                                              color: Colors.grey,
+                                            ),
+                                          ),
+                                        ],
+                                      ),
+                                    ),
+                                  ],
+                                ),
+                              ),
+                            ),
+                          );
+                        },
+                      ),
+                    ),
+                  ],
+                ),
+    );
+  }
+}
