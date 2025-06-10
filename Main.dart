@@ -20,34 +20,32 @@ void callbackDispatcher() {
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
-  
+
   // Inicializar base de datos
   await DatabaseService.instance.database;
-  
+
   // Configurar notificaciones
   const AndroidInitializationSettings initializationSettingsAndroid =
       AndroidInitializationSettings('@mipmap/ic_launcher');
-  
+
   const InitializationSettings initializationSettings =
       InitializationSettings(android: initializationSettingsAndroid);
-  
+
   await flutterLocalNotificationsPlugin.initialize(initializationSettings);
-  
+
   // Solicitar permisos
   await _requestPermissions();
-  
+
   // Inicializar worker para background tasks
   await Workmanager().initialize(callbackDispatcher, isInDebugMode: false);
-  
+
   runApp(const GasoxApp());
 }
 
 Future<void> _requestPermissions() async {
   await [
     Permission.location,
-    Permission.notification,
-    Permission.accessWifiState,
-    Permission.changeWifiState,
+    Permission.nearbyWifiDevices,
   ].request();
 }
 
@@ -59,20 +57,25 @@ class GasoxApp extends StatelessWidget {
     return MaterialApp(
       title: 'GASOX',
       theme: ThemeData(
-        primarySwatch: Colors.red,
-        primaryColor: const Color(0xFFD32F2F),
-        colorScheme: ColorScheme.fromSeed(
-          seedColor: const Color(0xFFD32F2F),
-          brightness: Brightness.light,
+        brightness: Brightness.dark,
+        scaffoldBackgroundColor: Colors.black,
+        primaryColor: Colors.orange,
+        colorScheme: ColorScheme.dark(
+          primary: Colors.orange,
+          secondary: Colors.orangeAccent,
+          background: Colors.black,
         ),
         appBarTheme: const AppBarTheme(
-          backgroundColor: Color(0xFFD32F2F),
-          foregroundColor: Colors.white,
-          elevation: 4,
+          backgroundColor: Colors.black,
+          foregroundColor: Colors.orange,
         ),
         floatingActionButtonTheme: const FloatingActionButtonThemeData(
           backgroundColor: Color(0xFFD32F2F),
           foregroundColor: Colors.white,
+        ),
+        sliderTheme: const SliderThemeData(
+          activeTrackColor: Colors.orange,
+          thumbColor: Colors.orangeAccent,
         ),
         useMaterial3: true,
       ),
