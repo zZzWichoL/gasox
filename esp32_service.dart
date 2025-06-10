@@ -1,4 +1,3 @@
-import 'dart:convert';
 import 'dart:io';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'database_service.dart';
@@ -7,8 +6,8 @@ import '../main.dart';
 import 'package:flutter_local_notifications/flutter_local_notifications.dart';
 
 class ESP32Service {
-  static const String defaultIP = '192.168.4.1';
-  static const int port = 8080;
+  static const String defaultHost = 'gasox.local';
+  static const int defaultPort = 8080;
   static const Duration timeout = Duration(seconds: 5);
 
   DateTime? _lastAlarmSave;
@@ -20,20 +19,21 @@ class ESP32Service {
   }
 
   Future<Socket> _connectToESP32() async {
-    // Intenta primero con gasox.local (mDNS)
-    try {
-      return await Socket.connect('gasox.local', port).timeout(timeout);
-    } catch (_) {
-      // Si falla, usa la IP guardada o la default
-      final manualIp = await _getManualIP();
-      final ip = manualIp != null && manualIp.isNotEmpty ? manualIp : defaultIP;
+    final prefs = await SharedPreferences.getInstance();
+    final ip = prefs.getString('esp32_ip');
+    final port = prefs.getInt('esp32_port');
+    print('Intentando conectar a $ip:$port');
+    if (ip != null && ip.isNotEmpty && port != null) {
       return await Socket.connect(ip, port).timeout(timeout);
     }
+    print('Intentando conectar a $defaultHost:$defaultPort');
+    return await Socket.connect(defaultHost, defaultPort).timeout(timeout);
   }
 
-  Future<void> setESP32IP(String ip) async {
+  Future<void> setESP32IP(String ip, [int port = 8080]) async {
     final prefs = await SharedPreferences.getInstance();
     await prefs.setString('esp32_ip', ip);
+    await prefs.setInt('esp32_port', port);
   }
 
   Future<String> _sendCommand(String command) async {
