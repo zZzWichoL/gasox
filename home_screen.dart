@@ -15,18 +15,17 @@ class HomeScreen extends StatefulWidget {
   State<HomeScreen> createState() => _HomeScreenState();
 }
 
-class _HomeScreenState extends State<HomeScreen>
-    with TickerProviderStateMixin {
+class _HomeScreenState extends State<HomeScreen> with TickerProviderStateMixin {
   final ESP32Service _esp32Service = ESP32Service();
   Timer? _timer;
-  
+
   int mq4Value = 0;
   int mq7Value = 0;
   double mq4Threshold = 3000;
   double mq7Threshold = 3000;
   bool isAlarmActive = false;
   bool isConnected = false;
-  
+
   late AnimationController _alarmAnimationController;
   late Animation<double> _alarmAnimation;
 
@@ -44,7 +43,7 @@ class _HomeScreenState extends State<HomeScreen>
       parent: _alarmAnimationController,
       curve: Curves.easeInOut,
     ));
-    
+
     _startPeriodicCheck();
   }
 
@@ -65,7 +64,7 @@ class _HomeScreenState extends State<HomeScreen>
     try {
       final values = await _esp32Service.getSensorValues();
       final alarmState = await _esp32Service.getAlarmState();
-      
+
       setState(() {
         mq4Value = values['mq4'] ?? 0;
         mq7Value = values['mq7'] ?? 0;
@@ -92,7 +91,7 @@ class _HomeScreenState extends State<HomeScreen>
     try {
       await _esp32Service.setMQ4Threshold(mq4Threshold.toInt());
       await _esp32Service.setMQ7Threshold(mq7Threshold.toInt());
-      
+
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(
           content: Text('Umbrales actualizados correctamente'),
@@ -117,9 +116,9 @@ class _HomeScreenState extends State<HomeScreen>
         mq7Value: mq7Value,
         isHighReading: isAlarmActive,
       );
-      
+
       await DatabaseService.instance.insertReading(reading);
-      
+
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(
           content: Text('Lectura guardada correctamente'),
@@ -176,7 +175,7 @@ class _HomeScreenState extends State<HomeScreen>
               },
             ),
             ListTile(
-              leading: const Icon(Icons.wifi_settings),
+              leading: const Icon(Icons.wifi),
               title: const Text('Configuración WiFi'),
               onTap: () {
                 Navigator.pop(context);
@@ -257,9 +256,9 @@ class _HomeScreenState extends State<HomeScreen>
                 ),
               ),
             ),
-            
+
             const SizedBox(height: 20),
-            
+
             // Alarma
             if (isAlarmActive)
               AnimatedBuilder(
@@ -269,7 +268,8 @@ class _HomeScreenState extends State<HomeScreen>
                     width: double.infinity,
                     padding: const EdgeInsets.all(20),
                     decoration: BoxDecoration(
-                      color: Colors.red.withOpacity(0.1 + _alarmAnimation.value * 0.3),
+                      color: Colors.red
+                          .withOpacity(0.1 + _alarmAnimation.value * 0.3),
                       border: Border.all(
                         color: Colors.red,
                         width: 2,
@@ -304,9 +304,9 @@ class _HomeScreenState extends State<HomeScreen>
                   );
                 },
               ),
-            
+
             const SizedBox(height: 20),
-            
+
             // Valores de sensores
             Row(
               children: [
@@ -333,7 +333,9 @@ class _HomeScreenState extends State<HomeScreen>
                             '$mq4Value ppm',
                             style: TextStyle(
                               fontSize: 24,
-                              color: mq4Value > mq4Threshold ? Colors.red : Colors.green,
+                              color: mq4Value > mq4Threshold
+                                  ? Colors.red
+                                  : Colors.green,
                               fontWeight: FontWeight.bold,
                             ),
                           ),
@@ -366,7 +368,9 @@ class _HomeScreenState extends State<HomeScreen>
                             '$mq7Value ppm',
                             style: TextStyle(
                               fontSize: 24,
-                              color: mq7Value > mq7Threshold ? Colors.red : Colors.green,
+                              color: mq7Value > mq7Threshold
+                                  ? Colors.red
+                                  : Colors.green,
                               fontWeight: FontWeight.bold,
                             ),
                           ),
@@ -377,9 +381,9 @@ class _HomeScreenState extends State<HomeScreen>
                 ),
               ],
             ),
-            
+
             const SizedBox(height: 20),
-            
+
             // Configuración de umbrales
             Card(
               child: Padding(
@@ -395,7 +399,7 @@ class _HomeScreenState extends State<HomeScreen>
                       ),
                     ),
                     const SizedBox(height: 16),
-                    
+
                     // MQ4 Threshold
                     Text('MQ4 (Metano): ${mq4Threshold.toInt()} ppm'),
                     Slider(
@@ -410,9 +414,9 @@ class _HomeScreenState extends State<HomeScreen>
                         });
                       },
                     ),
-                    
+
                     const SizedBox(height: 16),
-                    
+
                     // MQ7 Threshold
                     Text('MQ7 (CO): ${mq7Threshold.toInt()} ppm'),
                     Slider(
@@ -427,9 +431,9 @@ class _HomeScreenState extends State<HomeScreen>
                         });
                       },
                     ),
-                    
+
                     const SizedBox(height: 16),
-                    
+
                     SizedBox(
                       width: double.infinity,
                       child: ElevatedButton(
@@ -441,9 +445,9 @@ class _HomeScreenState extends State<HomeScreen>
                 ),
               ),
             ),
-            
+
             const SizedBox(height: 20),
-            
+
             // Botón para guardar lectura
             SizedBox(
               width: double.infinity,
