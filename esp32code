@@ -8,8 +8,8 @@ const int buzzerPin = 26;
 const int MQ4_PIN = 34; // ADC1_6 (GNC / Metano)
 const int MQ7_PIN = 35; // ADC1_7 (CO)
 
-int mq4Threshold = 3000; // Valor por defecto, puede ser modificado por la app
-int mq7Threshold = 3000; // Valor por defecto, puede ser modificado por la app
+int mq4Threshold = 3000;
+int mq7Threshold = 3000;
 
 unsigned long lastAlertTime = 0;
 bool alarmState = false;
@@ -22,11 +22,45 @@ void setup() {
   digitalWrite(buzzerPin, LOW);
 
   WiFiManager wifiManager;
+
+  // Cambia el color del portal a naranja
+  wifiManager.setCustomHeadElement(
+    "<style>"
+    "body{background-color:#222;}"
+    "h1,h2,h3,label,legend,span,div,td,th,p,a{color:#FFA500!important;}"
+    "button,input[type='submit'],.btn{background-color:#FFA500!important;color:#222!important;font-weight:bold;}"
+    "input,select{background-color:#333!important;color:#FFA500!important;border:1px solid #FFA500!important;}"
+    ".msg{color:#FFA500!important;}"
+    "</style>"
+  );
+
+  wifiManager.setAPCallback([](WiFiManager* wm) {
+    Serial.println("Conéctate a la red GASOX y abre el portal para configurar.");
+  });
+
+  wifiManager.setSaveConfigCallback([]() {
+    Serial.println("Configuración guardada, reiniciando...");
+  });
+
   wifiManager.autoConnect("GASOX");
+
+  // Mostrar la IP en el portal tras la conexión
+  String ipMsg = "<div style='margin:24px 0;padding:16px;background:#222;border:2px solid #FFA500;border-radius:12px;'>";
+  ipMsg += "<h2 style='color:#FFA500;'>¡Conexión exitosa!</h2>";
+  ipMsg += "<p style='color:#FFA500;font-size:18px;'>La nueva IP de tu ESP32 es:</p>";
+  ipMsg += "<div style='font-size:22px;font-weight:bold;color:#FFA500;background:#333;padding:8px 16px;border-radius:8px;display:inline-block;'>";
+  ipMsg += WiFi.localIP().toString();
+  ipMsg += "</div>";
+  ipMsg += "<p style='color:#FFA500;'>Cópiala y pégala en la app si gasox.local no funciona.</p>";
+  ipMsg += "</div>";
+
+  wifiManager.setCustomMenuHTML(ipMsg.c_str());
 
   Serial.println("WiFi conectado!");
   Serial.print("Dirección IP: ");
   Serial.println(WiFi.localIP());
+  
+  MDNS.addService("http", "tcp", 8080);
 
   if (MDNS.begin("gasox")) {
     Serial.println("mDNS responder iniciado: gasox.local");
@@ -52,18 +86,11 @@ void loop() {
   int mq4Value = analogRead(MQ4_PIN);
   int mq7Value = analogRead(MQ7_PIN);
 
-  Serial.print("MQ4 (GNC/Metano): ");
-  Serial.print(mq4Value);
-  Serial.print(" | MQ7 (CO): ");
-  Serial.println(mq7Value);
-
-  // Activar alarma si sobrepasan umbral
   alarmState = mq4Value > mq4Threshold || mq7Value > mq7Threshold;
   activateAlarm(alarmState);
 
   WiFiClient client = server.available();
   if (client) {
-    Serial.println("Cliente conectado");
     while (client.connected()) {
       if (client.available()) {
         String command = client.readStringUntil('\n');
@@ -79,6 +106,8 @@ void loop() {
           client.printf("MQ4:%d\nMQ7:%d\n", mq4Value, mq7Value);
         } else if (command == "GET_ALARM_STATE") {
           client.println(alarmState ? "ALARMA_ACTIVA" : "SIN_ALARMA");
+        } else if (command == "GET_IP") {
+          client.println(WiFi.localIP());
         } else if (command == "FORGET_WIFI") {
           client.println("OLVIDANDO_WIFI");
           client.flush();
@@ -93,8 +122,6 @@ void loop() {
       delay(10);
     }
     client.stop();
-    Serial.println("Cliente desconectado");
   }
-
-  delay(500); // Intervalo de muestreo
+  delay(500);
 }
