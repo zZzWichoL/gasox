@@ -1,7 +1,7 @@
 import 'package:flutter/material.dart';
-import 'package:intl/intl.dart';
-import '../services/database_service.dart';
-import '../models/sensor_reading.dart';
+import 'package:shared_preferences/shared_preferences.dart';
+import 'package:audioplayers/audioplayers.dart';
+import 'package:file_picker/file_picker.dart';
 
 class NotificationsScreen extends StatefulWidget {
   const NotificationsScreen({super.key});
@@ -11,76 +11,161 @@ class NotificationsScreen extends StatefulWidget {
 }
 
 class _NotificationsScreenState extends State<NotificationsScreen> {
-  List<SensorReading> _alarmReadings = [];
-  bool _isLoading = true;
+  bool _soundEnabled = true;
+  bool _vibrationEnabled = true;
+  bool _showNotifications = true;
+  double _alarmVolume = 0.8;
+  List<Map<String, dynamic>> _recentNotifications = [];
+
+  final AudioPlayer _audioPlayer = AudioPlayer();
+
+  final List<Map<String, String>> _availableSounds = [
+    {'name': 'Alarma 1', 'value': 'assets/sounds/alarm1.mp3'},
+    {'name': 'Alarma 2', 'value': 'assets/sounds/alarm2.mp3'},
+    {'name': 'Alarma 3', 'value': 'assets/sounds/alarm3.mp3'},
+  ];
+
+  String? _customAlarmPath; // Puede ser asset o archivo
 
   @override
   void initState() {
     super.initState();
-    _loadAlarmReadings();
+    _loadSettings();
+    _loadRecentNotifications();
   }
 
-  Future<void> _loadAlarmReadings() async {
-    setState(() {
-      _isLoading = true;
-    });
+  @override
+  void dispose() {
+    _audioPlayer.dispose();
+    super.dispose();
+  }
 
-    try {
-      final readings = await DatabaseService.instance.getHighReadings();
+  Future<void> _loadSettings() async {
+    final prefs = await SharedPreferences.getInstance();
+    setState(() {
+      _soundEnabled = prefs.getBool('notifications_sound') ?? true;
+      _vibrationEnabled = prefs.getBool('notifications_vibration') ?? true;
+      _showNotifications = prefs.getBool('show_notifications') ?? true;
+      _alarmVolume = prefs.getDouble('alarm_volume') ?? 0.8;
+      _customAlarmPath = prefs.getString('custom_alarm_path');
+    });
+  }
+
+  Future<void> _saveSettings() async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setBool('notifications_sound', _soundEnabled);
+    await prefs.setBool('notifications_vibration', _vibrationEnabled);
+    await prefs.setBool('show_notifications', _showNotifications);
+    await prefs.setDouble('alarm_volume', _alarmVolume);
+    if (_customAlarmPath != null) {
+      await prefs.setString('custom_alarm_path', _customAlarmPath!);
+    }
+    ScaffoldMessenger.of(context).showSnackBar(
+      const SnackBar(content: Text('Configuración guardada')),
+    );
+  }
+
+  Future<void> _loadRecentNotifications() async {
+    // Simulación de notificaciones recientes - en la app real vendrían de una base de datos
+    setState(() {
+      _recentNotifications = [
+        {
+          'title': 'Alerta de Gas',
+          'message': 'Nivel de gas detectado: Alto',
+          'time': DateTime.now().subtract(const Duration(minutes: 15)),
+          'type': 'critical',
+        },
+        {
+          'title': 'Sistema Conectado',
+          'message': 'ESP32 conectado exitosamente',
+          'time': DateTime.now().subtract(const Duration(hours: 2)),
+          'type': 'info',
+        },
+        {
+          'title': 'Batería Baja',
+          'message': 'Nivel de batería del sensor: 15%',
+          'time': DateTime.now().subtract(const Duration(hours: 5)),
+          'type': 'warning',
+        },
+      ];
+    });
+  }
+
+  Future<void> _pickCustomAlarm() async {
+    FilePickerResult? result = await FilePicker.platform.pickFiles(
+      type: FileType.custom,
+      allowedExtensions: ['mp3', 'wav'],
+    );
+    if (result != null && result.files.single.path != null) {
       setState(() {
-        _alarmReadings = readings;
+        _customAlarmPath = result.files.single.path!;
       });
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.setString('custom_alarm_path', _customAlarmPath!);
+    }
+  }
+
+  Future<void> _selectAssetAlarm(String assetPath) async {
+    setState(() {
+      _customAlarmPath = assetPath;
+    });
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setString('custom_alarm_path', assetPath);
+  }
+
+  Future<void> _testAlarmSound() async {
+    try {
+      await _audioPlayer.setVolume(_alarmVolume);
+      if (_customAlarmPath != null && _customAlarmPath!.startsWith('assets/')) {
+        await _audioPlayer
+            .play(AssetSource(_customAlarmPath!.replaceFirst('assets/', '')));
+      } else if (_customAlarmPath != null) {
+        await _audioPlayer.play(DeviceFileSource(_customAlarmPath!));
+      } else {
+        await _audioPlayer.play(AssetSource('sounds/alarm1.mp3'));
+      }
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Reproduciendo sonido de prueba...')),
+      );
     } catch (e) {
       ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-          content: Text('Error al cargar alarmas: $e'),
-          backgroundColor: Colors.red,
-        ),
+        SnackBar(content: Text('Error al reproducir sonido: $e')),
       );
-    } finally {
-      setState(() {
-        _isLoading = false;
-      });
     }
   }
 
-  String _getAlarmDescription(SensorReading reading) {
-    List<String> triggers = [];
-    
-    if (reading.mq4Value > 3000) {
-      triggers.add('Metano elevado (${reading.mq4Value} ppm)');
-    }
-    if (reading.mq7Value > 3000) {
-      triggers.add('Monóxido de carbono elevado (${reading.mq7Value} ppm)');
-    }
-    
-    return triggers.isNotEmpty 
-        ? triggers.join(', ') 
-        : 'Niveles de gas elevados';
+  void _clearNotifications() {
+    setState(() {
+      _recentNotifications.clear();
+    });
+    ScaffoldMessenger.of(context).showSnackBar(
+      const SnackBar(content: Text('Notificaciones eliminadas')),
+    );
   }
 
-  Color _getAlarmSeverity(SensorReading reading) {
-    final maxValue = reading.mq4Value > reading.mq7Value 
-        ? reading.mq4Value 
-        : reading.mq7Value;
-    
-    if (maxValue > 4000) return Colors.red.shade900;
-    if (maxValue > 3500) return Colors.red.shade700;
-    return Colors.red.shade500;
+  Color _getNotificationColor(String type) {
+    switch (type) {
+      case 'critical':
+        return Colors.red;
+      case 'warning':
+        return Colors.orange;
+      case 'info':
+        return Colors.blue;
+      default:
+        return Colors.grey;
+    }
   }
 
-  String _getTimeDifference(DateTime timestamp) {
-    final now = DateTime.now();
-    final difference = now.difference(timestamp);
-    
-    if (difference.inDays > 0) {
-      return 'hace ${difference.inDays} día${difference.inDays > 1 ? 's' : ''}';
-    } else if (difference.inHours > 0) {
-      return 'hace ${difference.inHours} hora${difference.inHours > 1 ? 's' : ''}';
-    } else if (difference.inMinutes > 0) {
-      return 'hace ${difference.inMinutes} minuto${difference.inMinutes > 1 ? 's' : ''}';
-    } else {
-      return 'hace unos segundos';
+  IconData _getNotificationIcon(String type) {
+    switch (type) {
+      case 'critical':
+        return Icons.warning;
+      case 'warning':
+        return Icons.error_outline;
+      case 'info':
+        return Icons.info_outline;
+      default:
+        return Icons.notifications;
     }
   }
 
@@ -88,310 +173,333 @@ class _NotificationsScreenState extends State<NotificationsScreen> {
   Widget build(BuildContext context) {
     return Scaffold(
       appBar: AppBar(
-        title: const Text('Notificaciones de Alarma'),
-        backgroundColor: Colors.red.shade700,
-        foregroundColor: Colors.white,
+        title: const Text('Configuración de Notificaciones'),
         actions: [
           IconButton(
-            icon: const Icon(Icons.refresh),
-            onPressed: _loadAlarmReadings,
+            icon: const Icon(Icons.save),
+            onPressed: _saveSettings,
           ),
         ],
       ),
-      body: _isLoading
-          ? const Center(child: CircularProgressIndicator())
-          : _alarmReadings.isEmpty
-              ? const Center(
-                  child: Column(
-                    mainAxisAlignment: MainAxisAlignment.center,
+      body: ListView(
+        padding: const EdgeInsets.all(16),
+        children: [
+          // Configuración general
+          Card(
+            color: Colors.blue.withOpacity(0.1),
+            child: Padding(
+              padding: const EdgeInsets.all(16),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Row(
                     children: [
-                      Icon(
-                        Icons.notifications_off,
-                        size: 64,
-                        color: Colors.grey,
-                      ),
-                      SizedBox(height: 16),
+                      const Icon(Icons.settings, color: Colors.blue),
+                      const SizedBox(width: 8),
                       Text(
-                        'No hay alarmas registradas',
+                        'Configuración General',
                         style: TextStyle(
+                          color: Colors.blue,
+                          fontWeight: FontWeight.bold,
                           fontSize: 18,
-                          color: Colors.grey,
-                        ),
-                      ),
-                      SizedBox(height: 8),
-                      Text(
-                        'Las alarmas aparecerán aquí cuando se detecten\nniveles peligrosos de gas',
-                        textAlign: TextAlign.center,
-                        style: TextStyle(
-                          fontSize: 14,
-                          color: Colors.grey,
                         ),
                       ),
                     ],
                   ),
-                )
-              : Column(
+                  const SizedBox(height: 16),
+                  SwitchListTile(
+                    title: const Text('Mostrar notificaciones'),
+                    subtitle: const Text('Habilitar todas las notificaciones'),
+                    value: _showNotifications,
+                    onChanged: (value) {
+                      setState(() {
+                        _showNotifications = value;
+                      });
+                    },
+                  ),
+                  SwitchListTile(
+                    title: const Text('Sonido'),
+                    subtitle: const Text('Reproducir sonido de alarma'),
+                    value: _soundEnabled,
+                    onChanged: _showNotifications
+                        ? (value) {
+                            setState(() {
+                              _soundEnabled = value;
+                            });
+                          }
+                        : null,
+                  ),
+                  SwitchListTile(
+                    title: const Text('Vibración'),
+                    subtitle: const Text('Vibrar al recibir notificaciones'),
+                    value: _vibrationEnabled,
+                    onChanged: _showNotifications
+                        ? (value) {
+                            setState(() {
+                              _vibrationEnabled = value;
+                            });
+                          }
+                        : null,
+                  ),
+                ],
+              ),
+            ),
+          ),
+
+          const SizedBox(height: 20),
+
+          // Configuración de sonido
+          if (_showNotifications && _soundEnabled)
+            Card(
+              color: Colors.orange.withOpacity(0.1),
+              child: Padding(
+                padding: const EdgeInsets.all(16),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
-                    // Resumen de alarmas
-                    Container(
-                      width: double.infinity,
-                      padding: const EdgeInsets.all(16),
-                      margin: const EdgeInsets.all(16),
-                      decoration: BoxDecoration(
-                        color: Colors.red.shade50,
-                        borderRadius: BorderRadius.circular(12),
-                        border: Border.all(color: Colors.red.shade200),
-                      ),
-                      child: Column(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        children: [
-                          Row(
-                            children: [
-                              Icon(
-                                Icons.warning,
-                                color: Colors.red.shade700,
-                                size: 24,
-                              ),
-                              const SizedBox(width: 8),
-                              Text(
-                                'Resumen de Alarmas',
-                                style: TextStyle(
-                                  fontSize: 18,
-                                  fontWeight: FontWeight.bold,
-                                  color: Colors.red.shade700,
-                                ),
-                              ),
-                            ],
+                    Row(
+                      children: [
+                        const Icon(Icons.volume_up, color: Colors.orange),
+                        const SizedBox(width: 8),
+                        Text(
+                          'Configuración de Audio',
+                          style: TextStyle(
+                            color: Colors.orange,
+                            fontWeight: FontWeight.bold,
+                            fontSize: 18,
                           ),
-                          const SizedBox(height: 12),
-                          Row(
-                            mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                            children: [
-                              Column(
-                                crossAxisAlignment: CrossAxisAlignment.start,
-                                children: [
-                                  Text(
-                                    'Total de alarmas',
-                                    style: TextStyle(
-                                      fontSize: 14,
-                                      color: Colors.red.shade600,
-                                    ),
-                                  ),
-                                  Text(
-                                    '${_alarmReadings.length}',
-                                    style: TextStyle(
-                                      fontSize: 24,
-                                      fontWeight: FontWeight.bold,
-                                      color: Colors.red.shade700,
-                                    ),
-                                  ),
-                                ],
-                              ),
-                              if (_alarmReadings.isNotEmpty)
-                                Column(
-                                  crossAxisAlignment: CrossAxisAlignment.end,
-                                  children: [
-                                    Text(
-                                      'Última alarma',
-                                      style: TextStyle(
-                                        fontSize: 14,
-                                        color: Colors.red.shade600,
-                                      ),
-                                    ),
-                                    Text(
-                                      _getTimeDifference(_alarmReadings.first.timestamp),
-                                      style: TextStyle(
-                                        fontSize: 16,
-                                        fontWeight: FontWeight.bold,
-                                        color: Colors.red.shade700,
-                                      ),
-                                    ),
-                                  ],
-                                ),
-                            ],
-                          ),
-                        ],
-                      ),
+                        ),
+                      ],
                     ),
-                    
-                    // Lista de alarmas
-                    Expanded(
-                      child: ListView.builder(
-                        padding: const EdgeInsets.symmetric(horizontal: 16),
-                        itemCount: _alarmReadings.length,
-                        itemBuilder: (context, index) {
-                          final reading = _alarmReadings[index];
-                          final severity = _getAlarmSeverity(reading);
-                          
-                          return Card(
-                            margin: const EdgeInsets.only(bottom: 12),
-                            child: Container(
-                              decoration: BoxDecoration(
-                                borderRadius: BorderRadius.circular(12),
-                                border: Border.all(color: severity, width: 2),
-                              ),
-                              child: Padding(
-                                padding: const EdgeInsets.all(16),
-                                child: Column(
-                                  crossAxisAlignment: CrossAxisAlignment.start,
-                                  children: [
-                                    Row(
-                                      children: [
-                                        Container(
-                                          padding: const EdgeInsets.symmetric(
-                                            horizontal: 8,
-                                            vertical: 4,
-                                          ),
-                                          decoration: BoxDecoration(
-                                            color: severity,
-                                            borderRadius: BorderRadius.circular(12),
-                                          ),
-                                          child: const Text(
-                                            'ALARMA',
-                                            style: TextStyle(
-                                              color: Colors.white,
-                                              fontWeight: FontWeight.bold,
-                                              fontSize: 12,
-                                            ),
-                                          ),
-                                        ),
-                                        const Spacer(),
-                                        Text(
-                                          _getTimeDifference(reading.timestamp),
-                                          style: const TextStyle(
-                                            fontSize: 12,
-                                            color: Colors.grey,
-                                          ),
-                                        ),
-                                      ],
-                                    ),
-                                    
-                                    const SizedBox(height: 12),
-                                    
-                                    Text(
-                                      _getAlarmDescription(reading),
-                                      style: const TextStyle(
-                                        fontSize: 16,
-                                        fontWeight: FontWeight.w500,
-                                      ),
-                                    ),
-                                    
-                                    const SizedBox(height: 12),
-                                    
-                                    Row(
-                                      children: [
-                                        Expanded(
-                                          child: Container(
-                                            padding: const EdgeInsets.all(8),
-                                            decoration: BoxDecoration(
-                                              color: Colors.orange.shade50,
-                                              borderRadius: BorderRadius.circular(8),
-                                              border: Border.all(color: Colors.orange.shade200),
-                                            ),
-                                            child: Column(
-                                              children: [
-                                                const Icon(
-                                                  Icons.gas_meter,
-                                                  color: Colors.orange,
-                                                  size: 20,
-                                                ),
-                                                const SizedBox(height: 4),
-                                                const Text(
-                                                  'MQ4',
-                                                  style: TextStyle(
-                                                    fontSize: 12,
-                                                    fontWeight: FontWeight.bold,
-                                                  ),
-                                                ),
-                                                Text(
-                                                  '${reading.mq4Value} ppm',
-                                                  style: const TextStyle(
-                                                    fontSize: 14,
-                                                    fontWeight: FontWeight.w500,
-                                                  ),
-                                                ),
-                                              ],
-                                            ),
-                                          ),
-                                        ),
-                                        
-                                        const SizedBox(width: 12),
-                                        
-                                        Expanded(
-                                          child: Container(
-                                            padding: const EdgeInsets.all(8),
-                                            decoration: BoxDecoration(
-                                              color: Colors.grey.shade50,
-                                              borderRadius: BorderRadius.circular(8),
-                                              border: Border.all(color: Colors.grey.shade300),
-                                            ),
-                                            child: Column(
-                                              children: [
-                                                const Icon(
-                                                  Icons.cloud,
-                                                  color: Colors.grey,
-                                                  size: 20,
-                                                ),
-                                                const SizedBox(height: 4),
-                                                const Text(
-                                                  'MQ7',
-                                                  style: TextStyle(
-                                                    fontSize: 12,
-                                                    fontWeight: FontWeight.bold,
-                                                  ),
-                                                ),
-                                                Text(
-                                                  '${reading.mq7Value} ppm',
-                                                  style: const TextStyle(
-                                                    fontSize: 14,
-                                                    fontWeight: FontWeight.w500,
-                                                  ),
-                                                ),
-                                              ],
-                                            ),
-                                          ),
-                                        ),
-                                      ],
-                                    ),
-                                    
-                                    const SizedBox(height: 12),
-                                    
-                                    // Fecha y hora exacta
-                                    Container(
-                                      width: double.infinity,
-                                      padding: const EdgeInsets.all(8),
-                                      decoration: BoxDecoration(
-                                        color: Colors.grey.shade100,
-                                        borderRadius: BorderRadius.circular(8),
-                                      ),
-                                      child: Row(
-                                        children: [
-                                          const Icon(
-                                            Icons.access_time,
-                                            size: 16,
-                                            color: Colors.grey,
-                                          ),
-                                          const SizedBox(width: 8),
-                                          Text(
-                                            DateFormat('dd/MM/yyyy - HH:mm:ss').format(reading.timestamp),
-                                            style: const TextStyle(
-                                              fontSize: 14,
-                                              color: Colors.grey,
-                                            ),
-                                          ),
-                                        ],
-                                      ),
-                                    ),
-                                  ],
-                                ),
-                              ),
-                            ),
-                          );
-                        },
+                    const SizedBox(height: 16),
+                    const Text(
+                      'Sonido de alarma:',
+                      style: TextStyle(fontWeight: FontWeight.w500),
+                    ),
+                    const SizedBox(height: 8),
+                    Row(
+                      children: [
+                        ElevatedButton.icon(
+                          icon: const Icon(Icons.music_note),
+                          label: const Text('Archivo MP3'),
+                          onPressed: _pickCustomAlarm,
+                        ),
+                        const SizedBox(width: 8),
+                        DropdownButton<String>(
+                          value: _availableSounds
+                                  .any((s) => s['value'] == _customAlarmPath)
+                              ? _customAlarmPath
+                              : null,
+                          hint: const Text('Predeterminada'),
+                          items: _availableSounds
+                              .map((sound) => DropdownMenuItem<String>(
+                                    value: sound['value'],
+                                    child: Text(sound['name']!),
+                                  ))
+                              .toList(),
+                          onChanged: (value) async {
+                            await _selectAssetAlarm(value!);
+                          },
+                        ),
+                        const SizedBox(width: 8),
+                        Expanded(
+                          child: Text(
+                            _customAlarmPath != null
+                                ? (_availableSounds.firstWhere(
+                                        (s) => s['value'] == _customAlarmPath,
+                                        orElse: () => {
+                                              'name': _customAlarmPath!
+                                                  .split('/')
+                                                  .last
+                                            })['name'] ??
+                                    _customAlarmPath!.split('/').last)
+                                : 'No hay archivo seleccionado',
+                            style: const TextStyle(fontWeight: FontWeight.w500),
+                          ),
+                        ),
+                      ],
+                    ),
+                    const SizedBox(height: 16),
+                    Row(
+                      children: [
+                        const Text('Volumen: '),
+                        Expanded(
+                          child: Slider(
+                            value: _alarmVolume,
+                            min: 0.0,
+                            max: 1.0,
+                            divisions: 10,
+                            label: '${(_alarmVolume * 100).round()}%',
+                            onChanged: (value) {
+                              setState(() {
+                                _alarmVolume = value;
+                              });
+                            },
+                          ),
+                        ),
+                      ],
+                    ),
+                    const SizedBox(height: 8),
+                    Center(
+                      child: ElevatedButton.icon(
+                        icon: const Icon(Icons.play_arrow),
+                        label: const Text('Probar sonido'),
+                        style: ElevatedButton.styleFrom(
+                          backgroundColor: Colors.orange,
+                          foregroundColor: Colors.black,
+                        ),
+                        onPressed: _testAlarmSound,
                       ),
                     ),
                   ],
                 ),
+              ),
+            ),
+
+          const SizedBox(height: 20),
+
+          // Notificaciones recientes
+          Card(
+            color: Colors.green.withOpacity(0.1),
+            child: Padding(
+              padding: const EdgeInsets.all(16),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Row(
+                    mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                    children: [
+                      Row(
+                        children: [
+                          const Icon(Icons.history, color: Colors.green),
+                          const SizedBox(width: 8),
+                          Text(
+                            'Notificaciones Recientes',
+                            style: TextStyle(
+                              color: Colors.green,
+                              fontWeight: FontWeight.bold,
+                              fontSize: 18,
+                            ),
+                          ),
+                        ],
+                      ),
+                      if (_recentNotifications.isNotEmpty)
+                        TextButton(
+                          onPressed: _clearNotifications,
+                          child: const Text('Limpiar'),
+                        ),
+                    ],
+                  ),
+                  const SizedBox(height: 16),
+                  if (_recentNotifications.isEmpty)
+                    const Center(
+                      child: Padding(
+                        padding: EdgeInsets.all(20),
+                        child: Text(
+                          'No hay notificaciones recientes',
+                          style: TextStyle(color: Colors.white60),
+                        ),
+                      ),
+                    )
+                  else
+                    Column(
+                      children: _recentNotifications.map((notification) {
+                        return Card(
+                          color: Colors.white10,
+                          margin: const EdgeInsets.only(bottom: 8),
+                          child: ListTile(
+                            leading: Icon(
+                              _getNotificationIcon(notification['type']),
+                              color:
+                                  _getNotificationColor(notification['type']),
+                            ),
+                            title: Text(
+                              notification['title'],
+                              style:
+                                  const TextStyle(fontWeight: FontWeight.w500),
+                            ),
+                            subtitle: Column(
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              children: [
+                                Text(notification['message']),
+                                const SizedBox(height: 4),
+                                Text(
+                                  _formatTime(notification['time']),
+                                  style: const TextStyle(
+                                    color: Colors.white54,
+                                    fontSize: 12,
+                                  ),
+                                ),
+                              ],
+                            ),
+                            isThreeLine: true,
+                          ),
+                        );
+                      }).toList(),
+                    ),
+                ],
+              ),
+            ),
+          ),
+
+          const SizedBox(height: 20),
+
+          // Botón de prueba
+          Card(
+            color: Colors.purple.withOpacity(0.1),
+            child: Padding(
+              padding: const EdgeInsets.all(16),
+              child: Column(
+                children: [
+                  Row(
+                    children: [
+                      const Icon(Icons.notifications_active,
+                          color: Colors.purple),
+                      const SizedBox(width: 8),
+                      Text(
+                        'Prueba de Notificación',
+                        style: TextStyle(
+                          color: Colors.purple,
+                          fontWeight: FontWeight.bold,
+                          fontSize: 18,
+                        ),
+                      ),
+                    ],
+                  ),
+                  const SizedBox(height: 16),
+                  const Text(
+                    'Envía una notificación de prueba para verificar tu configuración',
+                    style: TextStyle(color: Colors.white70),
+                    textAlign: TextAlign.center,
+                  ),
+                  const SizedBox(height: 16),
+                  ElevatedButton.icon(
+                    icon: const Icon(Icons.send),
+                    label: const Text('Enviar notificación de prueba'),
+                    style: ElevatedButton.styleFrom(
+                      backgroundColor: Colors.purple,
+                      foregroundColor: Colors.white,
+                      padding: const EdgeInsets.symmetric(
+                          horizontal: 24, vertical: 12),
+                    ),
+                    onPressed: () {
+                      ScaffoldMessenger.of(context).showSnackBar(
+                        const SnackBar(
+                          content: Text('Notificación de prueba enviada'),
+                        ),
+                      );
+                    },
+                  ),
+                ],
+              ),
+            ),
+          ),
+        ],
+      ),
     );
+  }
+
+  String _formatTime(DateTime dateTime) {
+    return '${dateTime.hour}:${dateTime.minute.toString().padLeft(2, '0')}';
   }
 }
