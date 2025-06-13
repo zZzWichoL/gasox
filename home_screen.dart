@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import 'dart:async';
+import 'package:shared_preferences/shared_preferences.dart';
 import '../services/esp32_service.dart';
 import '../services/database_service.dart';
 import '../models/sensor_reading.dart';
@@ -7,6 +8,10 @@ import 'network_settings_screen.dart';
 import 'notifications_screen.dart';
 import 'info_screen.dart';
 import 'database_screen.dart';
+import 'package:audioplayers/audioplayers.dart';
+import 'package:vibration/vibration.dart';
+import 'package:flutter_local_notifications/flutter_local_notifications.dart';
+import '../main.dart';
 
 class HomeScreen extends StatefulWidget {
   const HomeScreen({super.key});
@@ -26,8 +31,15 @@ class _HomeScreenState extends State<HomeScreen> with TickerProviderStateMixin {
   bool isAlarmActive = false;
   bool isConnected = false;
 
+  bool _wasAlarmActive = false;
+
   late AnimationController _alarmAnimationController;
   late Animation<double> _alarmAnimation;
+
+  late TextEditingController _mq4Controller;
+  late TextEditingController _mq7Controller;
+
+  DateTime? _lastAutoSave;
 
   @override
   void initState() {
@@ -44,13 +56,22 @@ class _HomeScreenState extends State<HomeScreen> with TickerProviderStateMixin {
       curve: Curves.easeInOut,
     ));
 
-    _startPeriodicCheck();
+    _mq4Controller =
+        TextEditingController(text: mq4Threshold.toInt().toString());
+    _mq7Controller =
+        TextEditingController(text: mq7Threshold.toInt().toString());
+
+    _loadSavedConnection().then((_) {
+      _startPeriodicCheck();
+    });
   }
 
   @override
   void dispose() {
     _timer?.cancel();
     _alarmAnimationController.dispose();
+    _mq4Controller.dispose();
+    _mq7Controller.dispose();
     super.dispose();
   }
 
@@ -65,6 +86,13 @@ class _HomeScreenState extends State<HomeScreen> with TickerProviderStateMixin {
       final values = await _esp32Service.getSensorValues();
       final alarmState = await _esp32Service.getAlarmState();
 
+      // Si la alarma se activa y antes no estaba activa, reproduce sonido y muestra notificación
+      if (alarmState && !_wasAlarmActive) {
+        await _playAlarmSound();
+        await _showAlarmNotification();
+      }
+      _wasAlarmActive = alarmState;
+
       setState(() {
         mq4Value = values['mq4'] ?? 0;
         mq7Value = values['mq7'] ?? 0;
@@ -72,7 +100,14 @@ class _HomeScreenState extends State<HomeScreen> with TickerProviderStateMixin {
         isConnected = true;
       });
 
+      // Guardado automático cada 10 minutos si la alarma está activa
       if (isAlarmActive) {
+        if (_lastAutoSave == null ||
+            DateTime.now().difference(_lastAutoSave!) >
+                const Duration(minutes: 10)) {
+          await _saveCurrentReading(auto: true);
+          _lastAutoSave = DateTime.now();
+        }
         _alarmAnimationController.repeat(reverse: true);
       } else {
         _alarmAnimationController.stop();
@@ -108,7 +143,7 @@ class _HomeScreenState extends State<HomeScreen> with TickerProviderStateMixin {
     }
   }
 
-  Future<void> _saveCurrentReading() async {
+  Future<void> _saveCurrentReading({bool auto = false}) async {
     try {
       final reading = SensorReading(
         timestamp: DateTime.now(),
@@ -119,20 +154,81 @@ class _HomeScreenState extends State<HomeScreen> with TickerProviderStateMixin {
 
       await DatabaseService.instance.insertReading(reading);
 
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(
-          content: Text('Lectura guardada correctamente'),
-          backgroundColor: Colors.green,
-        ),
-      );
+      if (!auto) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('Lectura guardada correctamente'),
+            backgroundColor: Colors.green,
+          ),
+        );
+      }
     } catch (e) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-          content: Text('Error al guardar lectura: $e'),
-          backgroundColor: Colors.red,
-        ),
-      );
+      if (!auto) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('Error al guardar lectura: $e'),
+            backgroundColor: Colors.red,
+          ),
+        );
+      }
     }
+  }
+
+  Future<void> _loadSavedConnection() async {
+    final prefs = await SharedPreferences.getInstance();
+    final ip = prefs.getString('esp32_ip');
+    final port = prefs.getInt('esp32_port') ?? 8080;
+    if (ip != null && ip.isNotEmpty) {
+      await _esp32Service.connect(ip, port);
+      setState(() {
+        isConnected = true;
+      });
+    }
+  }
+
+  Future<void> _playAlarmSound() async {
+    final prefs = await SharedPreferences.getInstance();
+    final customAlarmPath = prefs.getString('custom_alarm_path');
+    final soundEnabled = prefs.getBool('notifications_sound') ?? true;
+    final vibrationEnabled = prefs.getBool('notifications_vibration') ?? true;
+    final alarmVolume = prefs.getDouble('alarm_volume') ?? 0.8;
+    final player = AudioPlayer();
+
+    if (soundEnabled) {
+      await player.setVolume(alarmVolume);
+      if (customAlarmPath != null && customAlarmPath.startsWith('assets/')) {
+        await player
+            .play(AssetSource(customAlarmPath.replaceFirst('assets/', '')));
+      } else if (customAlarmPath != null && customAlarmPath.isNotEmpty) {
+        await player.play(DeviceFileSource(customAlarmPath));
+      } else {
+        await player.play(AssetSource('sounds/alarm1.mp3'));
+      }
+    }
+    final hasVibrator = await Vibration.hasVibrator();
+    if (vibrationEnabled && (hasVibrator ?? false)) {
+      Vibration.vibrate(duration: 1000);
+    }
+  }
+
+  Future<void> _showAlarmNotification() async {
+    await flutterLocalNotificationsPlugin.show(
+      0,
+      '¡PELIGRO!',
+      'Se detectaron niveles peligrosos de gas',
+      const NotificationDetails(
+        android: AndroidNotificationDetails(
+          'alarm_channel',
+          'Alarmas',
+          channelDescription: 'Notificaciones de alarma de gas',
+          importance: Importance.max,
+          priority: Priority.high,
+          playSound: true,
+          enableVibration: true,
+        ),
+      ),
+      payload: 'alarm',
+    );
   }
 
   @override
@@ -276,15 +372,16 @@ class _HomeScreenState extends State<HomeScreen> with TickerProviderStateMixin {
                       ),
                       borderRadius: BorderRadius.circular(12),
                     ),
-                    child: const Column(
+                    child: Column(
                       children: [
                         Icon(
                           Icons.warning,
-                          color: Colors.red,
-                          size: 48,
+                          color: Colors.red
+                              .withOpacity(0.5 + 0.5 * _alarmAnimation.value),
+                          size: 48 + 16 * _alarmAnimation.value,
                         ),
-                        SizedBox(height: 8),
-                        Text(
+                        const SizedBox(height: 8),
+                        const Text(
                           '¡ALARMA ACTIVADA!',
                           style: TextStyle(
                             color: Colors.red,
@@ -292,11 +389,22 @@ class _HomeScreenState extends State<HomeScreen> with TickerProviderStateMixin {
                             fontWeight: FontWeight.bold,
                           ),
                         ),
-                        Text(
+                        const Text(
                           'Se han detectado niveles peligrosos de gas',
                           style: TextStyle(
                             color: Colors.red,
                             fontSize: 16,
+                          ),
+                        ),
+                        Padding(
+                          padding: const EdgeInsets.only(top: 16),
+                          child: Opacity(
+                            opacity: 0.5 + 0.5 * _alarmAnimation.value,
+                            child: Icon(
+                              Icons.change_history,
+                              color: Colors.red,
+                              size: 64 + 16 * _alarmAnimation.value,
+                            ),
                           ),
                         ),
                       ],
@@ -401,35 +509,87 @@ class _HomeScreenState extends State<HomeScreen> with TickerProviderStateMixin {
                     const SizedBox(height: 16),
 
                     // MQ4 Threshold
-                    Text('MQ4 (Metano): ${mq4Threshold.toInt()} ppm'),
-                    Slider(
-                      value: mq4Threshold,
-                      min: 1000,
-                      max: 5000,
-                      divisions: 40,
-                      label: mq4Threshold.toInt().toString(),
-                      onChanged: (value) {
-                        setState(() {
-                          mq4Threshold = value;
-                        });
-                      },
+                    Row(
+                      children: [
+                        Expanded(
+                          flex: 4,
+                          child: Slider(
+                            value: mq4Threshold,
+                            min: 0,
+                            max: 5000,
+                            divisions: 100,
+                            label: mq4Threshold.toInt().toString(),
+                            onChanged: (value) {
+                              setState(() {
+                                mq4Threshold = value;
+                                _mq4Controller.text =
+                                    mq4Threshold.toInt().toString();
+                              });
+                            },
+                          ),
+                        ),
+                        const SizedBox(width: 8),
+                        SizedBox(
+                          width: 70,
+                          child: TextField(
+                            controller: _mq4Controller,
+                            keyboardType: TextInputType.number,
+                            decoration: const InputDecoration(
+                              labelText: 'ppm',
+                              border: OutlineInputBorder(),
+                            ),
+                            onSubmitted: (value) {
+                              final v = double.tryParse(value) ?? mq4Threshold;
+                              setState(() {
+                                mq4Threshold = v.clamp(0, 5000);
+                              });
+                            },
+                          ),
+                        ),
+                      ],
                     ),
 
                     const SizedBox(height: 16),
 
                     // MQ7 Threshold
-                    Text('MQ7 (CO): ${mq7Threshold.toInt()} ppm'),
-                    Slider(
-                      value: mq7Threshold,
-                      min: 1000,
-                      max: 5000,
-                      divisions: 40,
-                      label: mq7Threshold.toInt().toString(),
-                      onChanged: (value) {
-                        setState(() {
-                          mq7Threshold = value;
-                        });
-                      },
+                    Row(
+                      children: [
+                        Expanded(
+                          flex: 4,
+                          child: Slider(
+                            value: mq7Threshold,
+                            min: 0,
+                            max: 5000,
+                            divisions: 100,
+                            label: mq7Threshold.toInt().toString(),
+                            onChanged: (value) {
+                              setState(() {
+                                mq7Threshold = value;
+                                _mq7Controller.text =
+                                    mq7Threshold.toInt().toString();
+                              });
+                            },
+                          ),
+                        ),
+                        const SizedBox(width: 8),
+                        SizedBox(
+                          width: 70,
+                          child: TextField(
+                            controller: _mq7Controller,
+                            keyboardType: TextInputType.number,
+                            decoration: const InputDecoration(
+                              labelText: 'ppm',
+                              border: OutlineInputBorder(),
+                            ),
+                            onSubmitted: (value) {
+                              final v = double.tryParse(value) ?? mq7Threshold;
+                              setState(() {
+                                mq7Threshold = v.clamp(0, 5000);
+                              });
+                            },
+                          ),
+                        ),
+                      ],
                     ),
 
                     const SizedBox(height: 16),
