@@ -1,0 +1,917 @@
+import 'package:flutter/material.dart';
+import 'dart:async';
+import 'package:shared_preferences/shared_preferences.dart';
+import '../services/esp32_service.dart';
+import '../services/database_service.dart';
+import '../models/sensor_reading.dart';
+import 'network_settings_screen.dart';
+import 'notifications_screen.dart';
+import 'info_screen.dart';
+import 'database_screen.dart';
+import 'package:audioplayers/audioplayers.dart';
+import 'package:vibration/vibration.dart';
+import 'package:flutter_local_notifications/flutter_local_notifications.dart';
+import '../main.dart';
+
+class HomeScreen extends StatefulWidget {
+  const HomeScreen({super.key});
+
+  @override
+  State<HomeScreen> createState() => _HomeScreenState();
+}
+
+class _HomeScreenState extends State<HomeScreen> with TickerProviderStateMixin {
+  final ESP32Service _esp32Service = ESP32Service();
+  Timer? _timer;
+
+  int mq4Value = 0;
+  int mq7Value = 0;
+  double mq4Threshold = 3000;
+  double mq7Threshold = 3000;
+  bool isAlarmActive = false;
+  bool isConnected = false;
+
+  bool _wasAlarmActive = false;
+  AudioPlayer? _alarmPlayer;
+  bool _isPlayingAlarm = false;
+
+  late AnimationController _alarmAnimationController;
+  late Animation<double> _alarmAnimation;
+
+  late TextEditingController _mq4Controller;
+  late TextEditingController _mq7Controller;
+
+  DateTime? _lastAutoSave;
+
+  @override
+  void initState() {
+    super.initState();
+    _alarmAnimationController = AnimationController(
+      duration: const Duration(milliseconds: 500),
+      vsync: this,
+    );
+    _alarmAnimation = Tween<double>(
+      begin: 0.0,
+      end: 1.0,
+    ).animate(CurvedAnimation(
+      parent: _alarmAnimationController,
+      curve: Curves.easeInOut,
+    ));
+
+    _mq4Controller =
+        TextEditingController(text: mq4Threshold.toInt().toString());
+    _mq7Controller =
+        TextEditingController(text: mq7Threshold.toInt().toString());
+
+    _loadSavedConnection().then((_) {
+      _startPeriodicCheck();
+    });
+  }
+
+  @override
+  void dispose() {
+    _timer?.cancel();
+    _alarmAnimationController.dispose();
+    _mq4Controller.dispose();
+    _mq7Controller.dispose();
+    _alarmPlayer?.dispose();
+    super.dispose();
+  }
+
+  void _startPeriodicCheck() {
+    _timer = Timer.periodic(const Duration(seconds: 2), (timer) {
+      _checkSensors();
+    });
+  }
+
+  Future<void> _checkSensors() async {
+    try {
+      print('Checking sensors...');
+      final values = await _esp32Service.getSensorValues();
+      final alarmState = await _esp32Service.getAlarmState();
+
+      print('MQ4: ${values['mq4']}, MQ7: ${values['mq7']}, Alarm: $alarmState');
+
+      // Si la alarma se activa y antes no estaba activa, reproduce sonido y muestra notificación
+      if (alarmState && !_wasAlarmActive) {
+        print(
+            '¡ALARMA ACTIVADA! Reproduciendo sonido y mostrando notificación');
+        await _playAlarmSound();
+        await _showAlarmNotification();
+        await _startVibration();
+      }
+
+      // Si la alarma se desactiva, detener sonido
+      if (!alarmState && _wasAlarmActive) {
+        print('Alarma desactivada, deteniendo sonido');
+        await _stopAlarmSound();
+      }
+
+      _wasAlarmActive = alarmState;
+
+      setState(() {
+        mq4Value = values['mq4'] ?? 0;
+        mq7Value = values['mq7'] ?? 0;
+        isAlarmActive = alarmState;
+        isConnected = true;
+      });
+
+      // Guardado automático cada 10 minutos si la alarma está activa
+      if (isAlarmActive) {
+        if (_lastAutoSave == null ||
+            DateTime.now().difference(_lastAutoSave!) >
+                const Duration(minutes: 10)) {
+          await _saveCurrentReading(auto: true);
+          _lastAutoSave = DateTime.now();
+        }
+        _alarmAnimationController.repeat(reverse: true);
+      } else {
+        _alarmAnimationController.stop();
+        _alarmAnimationController.reset();
+      }
+    } catch (e) {
+      print('Error checking sensors: $e');
+      setState(() {
+        isConnected = false;
+      });
+      _alarmAnimationController.stop();
+      _alarmAnimationController.reset();
+      await _stopAlarmSound();
+    }
+  }
+
+  Future<void> _updateThresholds() async {
+    try {
+      print(
+          'Updating thresholds: MQ4=${mq4Threshold.toInt()}, MQ7=${mq7Threshold.toInt()}');
+      await _esp32Service.setMQ4Threshold(mq4Threshold.toInt());
+      await _esp32Service.setMQ7Threshold(mq7Threshold.toInt());
+
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('Umbrales actualizados correctamente'),
+          backgroundColor: Colors.green,
+        ),
+      );
+    } catch (e) {
+      print('Error updating thresholds: $e');
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text('Error al actualizar umbrales: $e'),
+          backgroundColor: Colors.red,
+        ),
+      );
+    }
+  }
+
+  Future<void> _saveCurrentReading({bool auto = false}) async {
+    try {
+      final reading = SensorReading(
+        timestamp: DateTime.now(),
+        mq4Value: mq4Value,
+        mq7Value: mq7Value,
+        isHighReading: isAlarmActive,
+      );
+
+      await DatabaseService.instance.insertReading(reading);
+
+      if (!auto) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('Lectura guardada correctamente'),
+            backgroundColor: Colors.green,
+          ),
+        );
+      }
+    } catch (e) {
+      if (!auto) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('Error al guardar lectura: $e'),
+            backgroundColor: Colors.red,
+          ),
+        );
+      }
+    }
+  }
+
+  Future<void> _loadSavedConnection() async {
+    final prefs = await SharedPreferences.getInstance();
+    final ip = prefs.getString('esp32_ip');
+    final port = prefs.getInt('esp32_port') ?? 8080;
+    if (ip != null && ip.isNotEmpty) {
+      try {
+        await _esp32Service.connect(ip, port);
+        setState(() {
+          isConnected = true;
+        });
+        print('Connected to ESP32 at $ip:$port');
+      } catch (e) {
+        print('Failed to connect to ESP32: $e');
+        setState(() {
+          isConnected = false;
+        });
+      }
+    }
+  }
+
+  Future<void> _playAlarmSound() async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      final customAlarmPath = prefs.getString('custom_alarm_path');
+      final soundEnabled = prefs.getBool('notifications_sound') ?? true;
+      final alarmVolume = prefs.getDouble('alarm_volume') ?? 0.8;
+
+      if (!soundEnabled) {
+        print('Sound is disabled');
+        return;
+      }
+
+      if (_isPlayingAlarm) {
+        print('Alarm sound already playing');
+        return;
+      }
+
+      _alarmPlayer = AudioPlayer();
+      await _alarmPlayer!.setVolume(alarmVolume);
+      await _alarmPlayer!
+          .setReleaseMode(ReleaseMode.loop); // Loop the alarm sound
+
+      if (customAlarmPath != null && customAlarmPath.startsWith('assets/')) {
+        await _alarmPlayer!
+            .play(AssetSource(customAlarmPath.replaceFirst('assets/', '')));
+      } else if (customAlarmPath != null && customAlarmPath.isNotEmpty) {
+        await _alarmPlayer!.play(DeviceFileSource(customAlarmPath));
+      } else {
+        await _alarmPlayer!.play(AssetSource('sounds/alarm1.mp3'));
+      }
+
+      _isPlayingAlarm = true;
+      print('Alarm sound started');
+    } catch (e) {
+      print('Error playing alarm sound: $e');
+    }
+  }
+
+  Future<void> _stopAlarmSound() async {
+    try {
+      if (_alarmPlayer != null && _isPlayingAlarm) {
+        await _alarmPlayer!.stop();
+        await _alarmPlayer!.dispose();
+        _alarmPlayer = null;
+        _isPlayingAlarm = false;
+        print('Alarm sound stopped');
+      }
+    } catch (e) {
+      print('Error stopping alarm sound: $e');
+    }
+  }
+
+  Future<void> _startVibration() async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      final vibrationEnabled = prefs.getBool('notifications_vibration') ?? true;
+
+      if (!vibrationEnabled) {
+        print('Vibration is disabled');
+        return;
+      }
+
+      final hasVibrator = await Vibration.hasVibrator();
+      if (hasVibrator ?? false) {
+        // Vibrate in a pattern: vibrate for 1s, pause 0.5s, repeat
+        Vibration.vibrate(
+          pattern: [0, 1000, 500, 1000, 500, 1000],
+          repeat: 0, // Repeat the pattern
+        );
+        print('Vibration started');
+      }
+    } catch (e) {
+      print('Error starting vibration: $e');
+    }
+  }
+
+  Future<void> _showAlarmNotification() async {
+    try {
+      await flutterLocalNotificationsPlugin.show(
+        0,
+        '¡PELIGRO DE GAS!',
+        'Se detectaron niveles peligrosos: MQ4=$mq4Value ppm, MQ7=$mq7Value ppm',
+        const NotificationDetails(
+          android: AndroidNotificationDetails(
+            'alarm_channel',
+            'Alarmas de Gas',
+            channelDescription: 'Notificaciones de alarma de gas',
+            importance: Importance.max,
+            priority: Priority.high,
+            playSound: true,
+            enableVibration: true,
+            sound: RawResourceAndroidNotificationSound('alarm1'),
+            largeIcon: DrawableResourceAndroidBitmap('ic_launcher'),
+            color: Colors.red,
+            ledColor: Colors.red,
+            ledOnMs: 1000,
+            ledOffMs: 500,
+            ongoing: true, // Make it persistent
+            autoCancel: false,
+          ),
+        ),
+        payload: 'alarm',
+      );
+      print('Alarm notification shown');
+    } catch (e) {
+      print('Error showing notification: $e');
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      appBar: AppBar(
+        title: const Text('GASOX - Detector de Gas'),
+        backgroundColor: isAlarmActive ? Colors.red : null,
+        actions: [
+          IconButton(
+            icon: Icon(
+              isConnected ? Icons.wifi : Icons.wifi_off,
+              color: isConnected ? Colors.green : Colors.red,
+            ),
+            onPressed: () {},
+          ),
+          if (isAlarmActive)
+            IconButton(
+              icon: const Icon(Icons.volume_off, color: Colors.white),
+              onPressed: _stopAlarmSound,
+              tooltip: 'Silenciar alarma',
+            ),
+        ],
+      ),
+      drawer: Drawer(
+        child: ListView(
+          padding: EdgeInsets.zero,
+          children: [
+            const DrawerHeader(
+              decoration: BoxDecoration(
+                color: Color(0xFFD32F2F),
+              ),
+              child: Text(
+                'GASOX',
+                style: TextStyle(
+                  color: Colors.white,
+                  fontSize: 24,
+                  fontWeight: FontWeight.bold,
+                ),
+              ),
+            ),
+            ListTile(
+              leading: const Icon(Icons.home),
+              title: const Text('Inicio'),
+              onTap: () {
+                Navigator.pop(context);
+              },
+            ),
+            ListTile(
+              leading: const Icon(Icons.wifi),
+              title: const Text('Configuración WiFi'),
+              onTap: () {
+                Navigator.pop(context);
+                Navigator.push(
+                  context,
+                  MaterialPageRoute(
+                    builder: (context) => const NetworkSettingsScreen(),
+                  ),
+                );
+              },
+            ),
+            ListTile(
+              leading: const Icon(Icons.notifications),
+              title: const Text('Notificaciones'),
+              onTap: () {
+                Navigator.pop(context);
+                Navigator.push(
+                  context,
+                  MaterialPageRoute(
+                    builder: (context) => const NotificationsScreen(),
+                  ),
+                );
+              },
+            ),
+            ListTile(
+              leading: const Icon(Icons.info),
+              title: const Text('Información'),
+              onTap: () {
+                Navigator.pop(context);
+                Navigator.push(
+                  context,
+                  MaterialPageRoute(
+                    builder: (context) => const InfoScreen(),
+                  ),
+                );
+              },
+            ),
+            ListTile(
+              leading: const Icon(Icons.storage),
+              title: const Text('Base de Datos'),
+              onTap: () {
+                Navigator.pop(context);
+                Navigator.push(
+                  context,
+                  MaterialPageRoute(
+                    builder: (context) => const DatabaseScreen(),
+                  ),
+                );
+              },
+            ),
+          ],
+        ),
+      ),
+      body: Container(
+        color: isAlarmActive ? Colors.red.withOpacity(0.1) : null,
+        child: SingleChildScrollView(
+          padding: const EdgeInsets.all(16.0),
+          child: Column(
+            children: [
+              // Estado de conexión
+              Card(
+                color: isConnected
+                    ? Colors.green.withOpacity(0.1)
+                    : Colors.red.withOpacity(0.1),
+                child: Padding(
+                  padding: const EdgeInsets.all(16.0),
+                  child: Row(
+                    children: [
+                      Icon(
+                        isConnected ? Icons.check_circle : Icons.error,
+                        color: isConnected ? Colors.green : Colors.red,
+                        size: 32,
+                      ),
+                      const SizedBox(width: 16),
+                      Expanded(
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Text(
+                              isConnected
+                                  ? 'ESP32 Conectado'
+                                  : 'ESP32 Desconectado',
+                              style: const TextStyle(
+                                fontSize: 18,
+                                fontWeight: FontWeight.bold,
+                              ),
+                            ),
+                            if (isConnected)
+                              Text(
+                                'Última actualización: ${DateTime.now().toString().substring(11, 19)}',
+                                style: const TextStyle(
+                                    fontSize: 12, color: Colors.grey),
+                              ),
+                          ],
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+
+              const SizedBox(height: 20),
+
+              // Alarma
+              if (isAlarmActive)
+                AnimatedBuilder(
+                  animation: _alarmAnimation,
+                  builder: (context, child) {
+                    return Container(
+                      width: double.infinity,
+                      padding: const EdgeInsets.all(20),
+                      decoration: BoxDecoration(
+                        color: Colors.red
+                            .withOpacity(0.2 + _alarmAnimation.value * 0.3),
+                        border: Border.all(
+                          color: Colors.red,
+                          width: 3,
+                        ),
+                        borderRadius: BorderRadius.circular(12),
+                        boxShadow: [
+                          BoxShadow(
+                            color: Colors.red.withOpacity(0.5),
+                            blurRadius: 10,
+                            spreadRadius: 2,
+                          ),
+                        ],
+                      ),
+                      child: Column(
+                        children: [
+                          Icon(
+                            Icons.warning,
+                            color: Colors.red
+                                .withOpacity(0.5 + 0.5 * _alarmAnimation.value),
+                            size: 48 + 16 * _alarmAnimation.value,
+                          ),
+                          const SizedBox(height: 8),
+                          const Text(
+                            '¡ALARMA DE GAS ACTIVADA!',
+                            style: TextStyle(
+                              color: Colors.red,
+                              fontSize: 24,
+                              fontWeight: FontWeight.bold,
+                            ),
+                            textAlign: TextAlign.center,
+                          ),
+                          const Text(
+                            'NIVELES PELIGROSOS DETECTADOS',
+                            style: TextStyle(
+                              color: Colors.red,
+                              fontSize: 16,
+                              fontWeight: FontWeight.w600,
+                            ),
+                            textAlign: TextAlign.center,
+                          ),
+                          const SizedBox(height: 16),
+                          Row(
+                            mainAxisAlignment: MainAxisAlignment.spaceEvenly,
+                            children: [
+                              if (mq4Value > mq4Threshold)
+                                Column(
+                                  children: [
+                                    const Text('MQ4 (Metano)',
+                                        style: TextStyle(
+                                            fontWeight: FontWeight.bold)),
+                                    Text('$mq4Value ppm',
+                                        style: const TextStyle(
+                                            color: Colors.red, fontSize: 18)),
+                                  ],
+                                ),
+                              if (mq7Value > mq7Threshold)
+                                Column(
+                                  children: [
+                                    const Text('MQ7 (CO)',
+                                        style: TextStyle(
+                                            fontWeight: FontWeight.bold)),
+                                    Text('$mq7Value ppm',
+                                        style: const TextStyle(
+                                            color: Colors.red, fontSize: 18)),
+                                  ],
+                                ),
+                            ],
+                          ),
+                          const SizedBox(height: 16),
+                          ElevatedButton.icon(
+                            onPressed: _stopAlarmSound,
+                            icon: const Icon(Icons.volume_off),
+                            label: const Text('Silenciar'),
+                            style: ElevatedButton.styleFrom(
+                              backgroundColor: Colors.red,
+                              foregroundColor: Colors.white,
+                            ),
+                          ),
+                        ],
+                      ),
+                    );
+                  },
+                ),
+
+              const SizedBox(height: 20),
+
+              // Valores de sensores
+              Row(
+                children: [
+                  Expanded(
+                    child: Card(
+                      color: mq4Value > mq4Threshold
+                          ? Colors.red.withOpacity(0.1)
+                          : Colors.green.withOpacity(0.1),
+                      child: Padding(
+                        padding: const EdgeInsets.all(16.0),
+                        child: Column(
+                          children: [
+                            Icon(
+                              Icons.gas_meter,
+                              size: 48,
+                              color: mq4Value > mq4Threshold
+                                  ? Colors.red
+                                  : Colors.green,
+                            ),
+                            const SizedBox(height: 8),
+                            const Text(
+                              'MQ4 (Metano)',
+                              style: TextStyle(
+                                fontSize: 16,
+                                fontWeight: FontWeight.bold,
+                              ),
+                            ),
+                            Text(
+                              '$mq4Value ppm',
+                              style: TextStyle(
+                                fontSize: 24,
+                                color: mq4Value > mq4Threshold
+                                    ? Colors.red
+                                    : Colors.green,
+                                fontWeight: FontWeight.bold,
+                              ),
+                            ),
+                            Text(
+                              'Umbral: ${mq4Threshold.toInt()}',
+                              style: const TextStyle(
+                                  fontSize: 12, color: Colors.grey),
+                            ),
+                          ],
+                        ),
+                      ),
+                    ),
+                  ),
+                  const SizedBox(width: 16),
+                  Expanded(
+                    child: Card(
+                      color: mq7Value > mq7Threshold
+                          ? Colors.red.withOpacity(0.1)
+                          : Colors.green.withOpacity(0.1),
+                      child: Padding(
+                        padding: const EdgeInsets.all(16.0),
+                        child: Column(
+                          children: [
+                            Icon(
+                              Icons.cloud,
+                              size: 48,
+                              color: mq7Value > mq7Threshold
+                                  ? Colors.red
+                                  : Colors.green,
+                            ),
+                            const SizedBox(height: 8),
+                            const Text(
+                              'MQ7 (CO)',
+                              style: TextStyle(
+                                fontSize: 16,
+                                fontWeight: FontWeight.bold,
+                              ),
+                            ),
+                            Text(
+                              '$mq7Value ppm',
+                              style: TextStyle(
+                                fontSize: 24,
+                                color: mq7Value > mq7Threshold
+                                    ? Colors.red
+                                    : Colors.green,
+                                fontWeight: FontWeight.bold,
+                              ),
+                            ),
+                            Text(
+                              'Umbral: ${mq7Threshold.toInt()}',
+                              style: const TextStyle(
+                                  fontSize: 12, color: Colors.grey),
+                            ),
+                          ],
+                        ),
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+
+              const SizedBox(height: 20),
+
+              // Configuración de umbrales
+              Card(
+                child: Padding(
+                  padding: const EdgeInsets.all(16.0),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      const Text(
+                        'Configuración de Umbrales',
+                        style: TextStyle(
+                          fontSize: 18,
+                          fontWeight: FontWeight.bold,
+                        ),
+                      ),
+                      const SizedBox(height: 16),
+
+                      // MQ4 Threshold
+                      const Text('MQ4 (Metano):',
+                          style: TextStyle(fontWeight: FontWeight.w500)),
+                      Row(
+                        children: [
+                          Expanded(
+                            child: Slider(
+                              value: mq4Threshold,
+                              min: 1000,
+                              max: 5000,
+                              divisions: 40,
+                              label: '${mq4Threshold.toInt()} ppm',
+                              onChanged: (value) {
+                                setState(() {
+                                  mq4Threshold = value;
+                                  _mq4Controller.text =
+                                      value.toInt().toString();
+                                });
+                              },
+                            ),
+                          ),
+                          SizedBox(
+                            width: 80,
+                            child: TextField(
+                              controller: _mq4Controller,
+                              keyboardType: TextInputType.number,
+                              decoration: const InputDecoration(
+                                border: OutlineInputBorder(),
+                                contentPadding: EdgeInsets.symmetric(
+                                    horizontal: 8, vertical: 4),
+                                suffix:
+                                    Text('ppm', style: TextStyle(fontSize: 12)),
+                              ),
+                              onChanged: (value) {
+                                final parsed = double.tryParse(value);
+                                if (parsed != null &&
+                                    parsed >= 1000 &&
+                                    parsed <= 5000) {
+                                  setState(() {
+                                    mq4Threshold = parsed;
+                                  });
+                                }
+                              },
+                            ),
+                          ),
+                        ],
+                      ),
+
+                      const SizedBox(height: 16),
+
+                      // MQ7 Threshold
+                      const Text('MQ7 (CO):',
+                          style: TextStyle(fontWeight: FontWeight.w500)),
+                      Row(
+                        children: [
+                          Expanded(
+                            child: Slider(
+                              value: mq7Threshold,
+                              min: 1000,
+                              max: 5000,
+                              divisions: 40,
+                              label: '${mq7Threshold.toInt()} ppm',
+                              onChanged: (value) {
+                                setState(() {
+                                  mq7Threshold = value;
+                                  _mq7Controller.text =
+                                      value.toInt().toString();
+                                });
+                              },
+                            ),
+                          ),
+                          SizedBox(
+                            width: 80,
+                            child: TextField(
+                              controller: _mq7Controller,
+                              keyboardType: TextInputType.number,
+                              decoration: const InputDecoration(
+                                border: OutlineInputBorder(),
+                                contentPadding: EdgeInsets.symmetric(
+                                    horizontal: 8, vertical: 4),
+                                suffix:
+                                    Text('ppm', style: TextStyle(fontSize: 12)),
+                              ),
+                              onChanged: (value) {
+                                final parsed = double.tryParse(value);
+                                if (parsed != null &&
+                                    parsed >= 1000 &&
+                                    parsed <= 5000) {
+                                  setState(() {
+                                    mq7Threshold = parsed;
+                                  });
+                                }
+                              },
+                            ),
+                          ),
+                        ],
+                      ),
+
+                      const SizedBox(height: 16),
+
+                      // Botón para actualizar umbrales
+                      Center(
+                        child: ElevatedButton.icon(
+                          onPressed: isConnected ? _updateThresholds : null,
+                          icon: const Icon(Icons.update),
+                          label: const Text('Actualizar Umbrales'),
+                          style: ElevatedButton.styleFrom(
+                            backgroundColor: Colors.blue,
+                            foregroundColor: Colors.white,
+                          ),
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+
+              const SizedBox(height: 20),
+
+              // Botones de acción
+              Row(
+                children: [
+                  Expanded(
+                    child: ElevatedButton.icon(
+                      onPressed:
+                          isConnected ? () => _saveCurrentReading() : null,
+                      icon: const Icon(Icons.save),
+                      label: const Text('Guardar Lectura'),
+                      style: ElevatedButton.styleFrom(
+                        backgroundColor: Colors.green,
+                        foregroundColor: Colors.white,
+                      ),
+                    ),
+                  ),
+                  const SizedBox(width: 16),
+                  Expanded(
+                    child: ElevatedButton.icon(
+                      onPressed: () {
+                        Navigator.push(
+                          context,
+                          MaterialPageRoute(
+                            builder: (context) => const DatabaseScreen(),
+                          ),
+                        );
+                      },
+                      icon: const Icon(Icons.history),
+                      label: const Text('Ver Historial'),
+                      style: ElevatedButton.styleFrom(
+                        backgroundColor: Colors.orange,
+                        foregroundColor: Colors.white,
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+
+              const SizedBox(height: 20),
+
+              // Información adicional
+              Card(
+                color: Colors.blue.withOpacity(0.1),
+                child: Padding(
+                  padding: const EdgeInsets.all(16.0),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      const Row(
+                        children: [
+                          Icon(Icons.info, color: Colors.blue),
+                          SizedBox(width: 8),
+                          Text(
+                            'Información del Sistema',
+                            style: TextStyle(
+                              fontSize: 16,
+                              fontWeight: FontWeight.bold,
+                              color: Colors.blue,
+                            ),
+                          ),
+                        ],
+                      ),
+                      const SizedBox(height: 12),
+                      Row(
+                        mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                        children: [
+                          const Text('Estado de conexión:'),
+                          Text(
+                            isConnected ? 'Conectado' : 'Desconectado',
+                            style: TextStyle(
+                              color: isConnected ? Colors.green : Colors.red,
+                              fontWeight: FontWeight.bold,
+                            ),
+                          ),
+                        ],
+                      ),
+                      const SizedBox(height: 8),
+                      Row(
+                        mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                        children: [
+                          const Text('Estado de alarma:'),
+                          Text(
+                            isAlarmActive ? 'ACTIVA' : 'Normal',
+                            style: TextStyle(
+                              color: isAlarmActive ? Colors.red : Colors.green,
+                              fontWeight: FontWeight.bold,
+                            ),
+                          ),
+                        ],
+                      ),
+                      const SizedBox(height: 8),
+                      Row(
+                        mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                        children: [
+                          const Text('Última lectura:'),
+                          Text(
+                            DateTime.now().toString().substring(11, 19),
+                            style: const TextStyle(fontWeight: FontWeight.w500),
+                          ),
+                        ],
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
